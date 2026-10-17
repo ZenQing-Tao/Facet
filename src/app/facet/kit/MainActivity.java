@@ -239,6 +239,7 @@ public class MainActivity extends Activity {
         for (String k : sp.getAll().keySet()) {
             if (k.startsWith(Const.NAME)) pkgs.add(k.substring(Const.NAME.length()));
             if (k.startsWith(Const.ICON)) pkgs.add(k.substring(Const.ICON.length()));
+            if (k.startsWith(Const.FOLD) && sp.getBoolean(k, false)) pkgs.add(k.substring(Const.FOLD.length()));
         }
         count = pkgs.size();
         String s;
@@ -277,7 +278,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isCustomized(String pkg) {
-        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg);
+        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg) || sp.getBoolean(Const.FOLD + pkg, false);
     }
 
     private void filter() {
@@ -349,6 +350,11 @@ public class MainActivity extends Activity {
         shape.setChecked(sp.getBoolean(Const.SHAPE + item.pkg, true));
         box.addView(shape);
 
+        CheckBox fold = new CheckBox(this);
+        fold.setText("通知折叠进「更多通知」");
+        fold.setChecked(sp.getBoolean(Const.FOLD + item.pkg, false));
+        box.addView(fold);
+
         new AlertDialog.Builder(this)
                 .setTitle("自定义 " + item.label)
                 .setView(box)
@@ -359,6 +365,7 @@ public class MainActivity extends Activity {
                     if (editIcon != null) e.putString(Const.ICON + item.pkg, editIcon);
                     else if (editIconCleared) e.remove(Const.ICON + item.pkg);
                     e.putBoolean(Const.SHAPE + item.pkg, shape.isChecked());
+                    if (fold.isChecked()) e.putBoolean(Const.FOLD + item.pkg, true); else e.remove(Const.FOLD + item.pkg);
                     e.commit();
                     toast("已保存。点「重启桌面」「重启系统界面」生效");
                     updateStatus();
@@ -366,7 +373,7 @@ public class MainActivity extends Activity {
                 })
                 .setNeutralButton("全部恢复", (d, w) -> {
                     sp.edit().remove(Const.NAME + item.pkg).remove(Const.ICON + item.pkg)
-                            .remove(Const.SHAPE + item.pkg).commit();
+                            .remove(Const.SHAPE + item.pkg).remove(Const.FOLD + item.pkg).commit();
                     toast("已恢复默认");
                     updateStatus();
                     filter();
@@ -491,7 +498,8 @@ public class MainActivity extends Activity {
             if (custom != null) iv.setImageBitmap(custom); else iv.setImageDrawable(it.icon);
             String alias = sp.getString(Const.NAME + it.pkg, null);
             t1.setText(alias != null ? alias + "  ←  " + it.label : it.label);
-            t2.setText(it.pkg + (custom != null ? " · 已换图标" : ""));
+            t2.setText(it.pkg + (custom != null ? " · 已换图标" : "")
+                    + (sp.getBoolean(Const.FOLD + it.pkg, false) ? " · 通知已折叠" : ""));
             return row;
         }
     }

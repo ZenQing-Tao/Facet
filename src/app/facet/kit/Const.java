@@ -10,5 +10,8 @@ final class Const {
     /** 是否套用系统图标形状：s_<包名>，默认 true */
     static final String SHAPE = "s_";
 
+    /** 通知是否折叠进「更多通知」：f_<包名>，默认 false */
+    static final String FOLD = "f_";
+
     private Const() {}
 }

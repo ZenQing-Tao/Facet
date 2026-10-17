@@ -24,7 +24,9 @@ import android.util.Base64;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -46,6 +48,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Map<String, String> names = Collections.emptyMap();
     private static volatile Map<String, String> icons = Collections.emptyMap();
     private static volatile Map<String, Boolean> shapes = Collections.emptyMap();
+    private static volatile Set<String> folds = Collections.emptySet();
 
     private static final Map<String, Bitmap> rawCache = new ConcurrentHashMap<>();
     private static final Map<String, Bitmap> styledCache = new ConcurrentHashMap<>();
@@ -104,6 +107,7 @@ public class Hook implements IXposedHookLoadPackage {
         Map<String, String> n = new HashMap<>();
         Map<String, String> i = new HashMap<>();
         Map<String, Boolean> s = new HashMap<>();
+        Set<String> f = new HashSet<>();
         if (all != null) {
             for (Map.Entry<String, ?> e : all.entrySet()) {
                 String k = e.getKey();
@@ -114,12 +118,15 @@ public class Hook implements IXposedHookLoadPackage {
                     i.put(k.substring(Const.ICON.length()), (String) v);
                 } else if (k.startsWith(Const.SHAPE) && v instanceof Boolean) {
                     s.put(k.substring(Const.SHAPE.length()), (Boolean) v);
+                } else if (k.startsWith(Const.FOLD) && Boolean.TRUE.equals(v)) {
+                    f.add(k.substring(Const.FOLD.length()));
                 }
             }
         }
         names = n;
         icons = i;
         shapes = s;
+        folds = f;
         rawCache.clear();
         styledCache.clear();
     }
@@ -128,6 +135,12 @@ public class Hook implements IXposedHookLoadPackage {
         if (pkg == null) return null;
         refresh();
         return names.get(pkg);
+    }
+
+    private static boolean shouldFold(String pkg) {
+        if (pkg == null) return false;
+        refresh();
+        return folds.contains(pkg);
     }
 
     private static boolean hasIcon(String pkg) {
@@ -380,6 +393,28 @@ public class Hook implements IXposedHookLoadPackage {
                 if (pkg == null) pkg = (String) XposedHelpers.callMethod(param.thisObject, "getPackageName");
                 String n = nameFor(pkg);
                 if (n != null) param.setResult(n);
+            }
+        });
+
+        // 折叠进「更多通知」：澎湃每次新增/更新通知都会走 scheduleHistoryNotification，
+        // 默认等 6 小时才折叠，而且每次更新都会重新计时；这里对指定应用立刻折叠。
+        Class<?> foldCoordinator = XposedHelpers.findClassIfExists(
+                "com.android.systemui.statusbar.notification.collection.coordinator.FoldCoordinator", cl);
+        final Class<?> notifUtil = XposedHelpers.findClassIfExists(
+                "com.android.systemui.statusbar.notification.utils.NotificationUtil", cl);
+        safeHookAll(foldCoordinator, "scheduleHistoryNotification", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                try {
+                    Object entry = param.args[0];
+                    Object sbn = XposedHelpers.getObjectField(entry, "mSbn");
+                    String pkg = (String) XposedHelpers.getObjectField(sbn, "mPkgName");
+                    if (notifUtil != null && shouldFold(pkg)) {
+                        XposedHelpers.callStaticMethod(notifUtil, "setFold", entry, true);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + "fold failed: " + t);
+                }
             }
         });
 
