@@ -122,6 +122,8 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         state = getSharedPreferences("state", Context.MODE_PRIVATE);
+        //noinspection ResultOfMethodCallIgnored
+        new java.io.File(getCacheDir(), "update.apk").delete();   // 上次更新留下的安装包
         IntentFilter f = new IntentFilter(Updater.ACTION_INSTALL_RESULT);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(installReceiver, f, Context.RECEIVER_NOT_EXPORTED);
@@ -420,14 +422,33 @@ public class MainActivity extends Activity {
             String msg;
             try {
                 Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "killall " + pkg});
+                String err = new String(readFully(p.getErrorStream())).trim();
                 int code = p.waitFor();
-                msg = code == 0 ? "已重启 " + pkg : "重启失败（退出码 " + code + "）";
+                if (code == 0) {
+                    msg = "已重启 " + pkg;
+                } else if (err.contains("no process")) {
+                    msg = pkg + " 当前没有在运行，无需重启";
+                } else {
+                    msg = "重启失败（退出码 " + code + "）" + (err.isEmpty() ? "" : "：" + err);
+                }
+            } catch (java.io.IOException e) {
+                // su 根本启动不了：没授权，或者设备没有 Root
+                msg = "无法获取 Root（" + e.getMessage() + "）\n"
+                        + "请在 KernelSU / Magisk 的超级用户列表里给「" + getString(R.string.app_name) + "」授权后再试";
             } catch (Exception e) {
-                msg = "需要 Root：请在 KernelSU 里给「应用改名」授权";
+                msg = "重启失败：" + e;
             }
             String m = msg;
             runOnUiThread(() -> toast(m));
         }).start();
+    }
+
+    private static byte[] readFully(java.io.InputStream in) throws java.io.IOException {
+        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[1024];
+        int n;
+        while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+        return b.toByteArray();
     }
 
     // ---------------------------------------------------------------- UI 工具
