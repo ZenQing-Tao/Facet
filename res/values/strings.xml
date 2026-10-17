@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Facet</string>
+    <string name="xposed_desc">界面个性化扩展：自定义应用显示名称与图标</string>
+    <string-array name="xposed_scope">
+        <item>com.miui.home</item>
+        <item>com.android.systemui</item>
+        <item>com.android.settings</item>
+        <item>com.miui.securitycenter</item>
+        <item>com.miui.notification</item>
+        <item>app.facet.kit</item>
+    </string-array>
+</resources>
