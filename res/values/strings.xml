@@ -4,6 +4,7 @@
     <string name="xposed_desc">界面个性化扩展：自定义应用显示名称与图标</string>
     <string-array name="xposed_scope">
         <item>com.miui.home</item>
+        <item>com.motorola.launcher3</item>
         <item>com.android.systemui</item>
         <item>com.android.settings</item>
         <item>com.miui.securitycenter</item>

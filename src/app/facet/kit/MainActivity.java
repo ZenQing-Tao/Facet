@@ -7,10 +7,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.LauncherActivityInfo;
+import android.content.pm.LauncherApps;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Build;
+import android.os.UserHandle;
 import android.provider.Settings;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -69,7 +72,9 @@ public class MainActivity extends Activity {
     }
 
     static final class AppItem {
-        String pkg;
+        String pkg;      // 真正的包名
+        String key;      // 配置的键：包名，分身是 包名@用户ID
+        int userId;
         String label;
         Drawable icon;
     }
@@ -96,7 +101,7 @@ public class MainActivity extends Activity {
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.addView(button("重启桌面", v -> restart("com.miui.home")), weight());
+        buttons.addView(button("重启桌面", v -> restart(homePackage())), weight());
         buttons.addView(button("重启系统界面", v -> restart("com.android.systemui")), weight());
         buttons.addView(button("检查更新", v -> checkUpdate(true)), weight());
         root.addView(buttons);
@@ -255,19 +260,30 @@ public class MainActivity extends Activity {
 
     private void loadApps() {
         new Thread(() -> {
+            LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
             PackageManager pm = getPackageManager();
-            Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-            List<ResolveInfo> ris = pm.queryIntentActivities(i, 0);
             Set<String> seen = new HashSet<>();
             List<AppItem> items = new ArrayList<>();
-            for (ResolveInfo ri : ris) {
-                String pkg = ri.activityInfo.packageName;
-                if (Const.SELF.equals(pkg) || !seen.add(pkg)) continue;
-                AppItem it = new AppItem();
-                it.pkg = pkg;
-                it.label = String.valueOf(ri.activityInfo.applicationInfo.loadLabel(pm));
-                it.icon = ri.activityInfo.applicationInfo.loadIcon(pm);
-                items.add(it);
+            for (UserHandle u : la.getProfiles()) {
+                int uid = userIdOf(u);
+                List<LauncherActivityInfo> list;
+                try {
+                    list = la.getActivityList(null, u);
+                } catch (Exception e) {
+                    continue;
+                }
+                for (LauncherActivityInfo info : list) {
+                    String pkg = info.getComponentName().getPackageName();
+                    String key = uid == 0 ? pkg : pkg + "@" + uid;
+                    if (Const.SELF.equals(pkg) || !seen.add(key)) continue;
+                    AppItem it = new AppItem();
+                    it.pkg = pkg;
+                    it.userId = uid;
+                    it.key = key;
+                    it.label = String.valueOf(pm.getUserBadgedLabel(info.getLabel(), u));
+                    it.icon = info.getBadgedIcon(0);
+                    items.add(it);
+                }
             }
             runOnUiThread(() -> {
                 all.clear();
@@ -275,6 +291,14 @@ public class MainActivity extends Activity {
                 filter();
             });
         }).start();
+    }
+
+    private static int userIdOf(UserHandle u) {
+        try {
+            return (Integer) UserHandle.class.getMethod("getIdentifier").invoke(u);
+        } catch (Exception e) {
+            return u.hashCode();
+        }
     }
 
     private boolean isCustomized(String pkg) {
@@ -286,12 +310,12 @@ public class MainActivity extends Activity {
         for (AppItem it : all) {
             if (query.isEmpty() || it.pkg.toLowerCase(Locale.ROOT).contains(query)
                     || it.label.toLowerCase(Locale.ROOT).contains(query)
-                    || sp.getString(Const.NAME + it.pkg, "").toLowerCase(Locale.ROOT).contains(query)) {
+                    || sp.getString(Const.NAME + it.key, "").toLowerCase(Locale.ROOT).contains(query)) {
                 shown.add(it);
             }
         }
         Collections.sort(shown, (a, b) -> {
-            boolean ca = isCustomized(a.pkg), cb = isCustomized(b.pkg);
+            boolean ca = isCustomized(a.key), cb = isCustomized(b.key);
             if (ca != cb) return ca ? -1 : 1;
             return a.label.compareToIgnoreCase(b.label);
         });
@@ -311,14 +335,14 @@ public class MainActivity extends Activity {
         box.setPadding(pad, dp(8), pad, 0);
 
         TextView pkgView = new TextView(this);
-        pkgView.setText("原名：" + item.label + "\n包名：" + item.pkg);
+        pkgView.setText("原名：" + item.label + "\n包名：" + item.pkg + (item.userId != 0 ? "\n分身用户：" + item.userId : ""));
         pkgView.setTextSize(12);
         box.addView(pkgView);
 
         EditText name = new EditText(this);
         name.setSingleLine(true);
         name.setHint("新名称（留空 = 用原名）");
-        name.setText(sp.getString(Const.NAME + item.pkg, ""));
+        name.setText(sp.getString(Const.NAME + item.key, ""));
         box.addView(name);
 
         LinearLayout iconRow = new LinearLayout(this);
@@ -326,7 +350,7 @@ public class MainActivity extends Activity {
         iconRow.setGravity(Gravity.CENTER_VERTICAL);
         iconRow.setPadding(0, dp(12), 0, 0);
         editPreview = new ImageView(this);
-        String cur = sp.getString(Const.ICON + item.pkg, null);
+        String cur = sp.getString(Const.ICON + item.key, null);
         Bitmap curBmp = decode(cur);
         if (curBmp != null) editPreview.setImageBitmap(curBmp); else editPreview.setImageDrawable(item.icon);
         iconRow.addView(editPreview, new LinearLayout.LayoutParams(dp(64), dp(64)));
@@ -347,12 +371,12 @@ public class MainActivity extends Activity {
 
         CheckBox shape = new CheckBox(this);
         shape.setText("套用当前主题的图标形状");
-        shape.setChecked(sp.getBoolean(Const.SHAPE + item.pkg, true));
+        shape.setChecked(sp.getBoolean(Const.SHAPE + item.key, true));
         box.addView(shape);
 
         CheckBox fold = new CheckBox(this);
         fold.setText("通知折叠进「更多通知」");
-        fold.setChecked(sp.getBoolean(Const.FOLD + item.pkg, false));
+        fold.setChecked(sp.getBoolean(Const.FOLD + item.key, false));
         box.addView(fold);
 
         new AlertDialog.Builder(this)
@@ -361,19 +385,19 @@ public class MainActivity extends Activity {
                 .setPositiveButton("保存", (d, w) -> {
                     SharedPreferences.Editor e = sp.edit();
                     String n = name.getText().toString().trim();
-                    if (n.isEmpty()) e.remove(Const.NAME + item.pkg); else e.putString(Const.NAME + item.pkg, n);
-                    if (editIcon != null) e.putString(Const.ICON + item.pkg, editIcon);
-                    else if (editIconCleared) e.remove(Const.ICON + item.pkg);
-                    e.putBoolean(Const.SHAPE + item.pkg, shape.isChecked());
-                    if (fold.isChecked()) e.putBoolean(Const.FOLD + item.pkg, true); else e.remove(Const.FOLD + item.pkg);
+                    if (n.isEmpty()) e.remove(Const.NAME + item.key); else e.putString(Const.NAME + item.key, n);
+                    if (editIcon != null) e.putString(Const.ICON + item.key, editIcon);
+                    else if (editIconCleared) e.remove(Const.ICON + item.key);
+                    e.putBoolean(Const.SHAPE + item.key, shape.isChecked());
+                    if (fold.isChecked()) e.putBoolean(Const.FOLD + item.key, true); else e.remove(Const.FOLD + item.key);
                     e.commit();
                     toast("已保存。点「重启桌面」「重启系统界面」生效");
                     updateStatus();
                     filter();
                 })
                 .setNeutralButton("全部恢复", (d, w) -> {
-                    sp.edit().remove(Const.NAME + item.pkg).remove(Const.ICON + item.pkg)
-                            .remove(Const.SHAPE + item.pkg).remove(Const.FOLD + item.pkg).commit();
+                    sp.edit().remove(Const.NAME + item.key).remove(Const.ICON + item.key)
+                            .remove(Const.SHAPE + item.key).remove(Const.FOLD + item.key).commit();
                     toast("已恢复默认");
                     updateStatus();
                     filter();
@@ -423,6 +447,16 @@ public class MainActivity extends Activity {
     }
 
     // ---------------------------------------------------------------- 重启
+
+    /** 当前默认桌面的包名：小米是 com.miui.home，moto 是 com.motorola.launcher3。 */
+    private String homePackage() {
+        ResolveInfo ri = getPackageManager().resolveActivity(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY);
+        if (ri != null && ri.activityInfo != null && !"android".equals(ri.activityInfo.packageName)) {
+            return ri.activityInfo.packageName;
+        }
+        return "com.miui.home";
+    }
 
     private void restart(String pkg) {
         new Thread(() -> {
@@ -494,12 +528,12 @@ public class MainActivity extends Activity {
             LinearLayout texts = (LinearLayout) row.getChildAt(1);
             TextView t1 = (TextView) texts.getChildAt(0);
             TextView t2 = (TextView) texts.getChildAt(1);
-            Bitmap custom = decode(sp.getString(Const.ICON + it.pkg, null));
+            Bitmap custom = decode(sp.getString(Const.ICON + it.key, null));
             if (custom != null) iv.setImageBitmap(custom); else iv.setImageDrawable(it.icon);
-            String alias = sp.getString(Const.NAME + it.pkg, null);
+            String alias = sp.getString(Const.NAME + it.key, null);
             t1.setText(alias != null ? alias + "  ←  " + it.label : it.label);
-            t2.setText(it.pkg + (custom != null ? " · 已换图标" : "")
-                    + (sp.getBoolean(Const.FOLD + it.pkg, false) ? " · 通知已折叠" : ""));
+            t2.setText(it.pkg + (it.userId != 0 ? " · 分身" : "") + (custom != null ? " · 已换图标" : "")
+                    + (sp.getBoolean(Const.FOLD + it.key, false) ? " · 通知已折叠" : ""));
             return row;
         }
     }

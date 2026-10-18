@@ -15,10 +15,15 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Color;
+import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.InsetDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.service.notification.StatusBarNotification;
 import android.util.Base64;
 
 import java.lang.reflect.Method;
@@ -49,6 +54,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Map<String, String> icons = Collections.emptyMap();
     private static volatile Map<String, Boolean> shapes = Collections.emptyMap();
     private static volatile Set<String> folds = Collections.emptySet();
+    private static volatile Map<String, Integer> tokens = Collections.emptyMap();
 
     private static final Map<String, Bitmap> rawCache = new ConcurrentHashMap<>();
     private static final Map<String, Bitmap> styledCache = new ConcurrentHashMap<>();
@@ -73,6 +79,11 @@ public class Hook implements IXposedHookLoadPackage {
             }
         }
         // 同一进程可能多次回调（插件等其它 ClassLoader），只在能找到目标类的那次挂钩
+        if (!"com.miui.home".equals(lp.packageName) && !launcherHooked
+                && XposedHelpers.findClassIfExists("com.android.launcher3.icons.IconProvider", lp.classLoader) != null) {
+            launcherHooked = true;
+            hookLauncher3(lp.classLoader);
+        }
         if ("com.miui.home".equals(lp.packageName) && !launcherHooked
                 && XposedHelpers.findClassIfExists("com.miui.home.icon.IconProvider", lp.classLoader) != null) {
             launcherHooked = true;
@@ -108,6 +119,7 @@ public class Hook implements IXposedHookLoadPackage {
         Map<String, String> i = new HashMap<>();
         Map<String, Boolean> s = new HashMap<>();
         Set<String> f = new HashSet<>();
+        Map<String, Integer> t = new HashMap<>();
         if (all != null) {
             for (Map.Entry<String, ?> e : all.entrySet()) {
                 String k = e.getKey();
@@ -121,14 +133,41 @@ public class Hook implements IXposedHookLoadPackage {
                 } else if (k.startsWith(Const.FOLD) && Boolean.TRUE.equals(v)) {
                     f.add(k.substring(Const.FOLD.length()));
                 }
+                // 启动器缓存失效用：同一个包（含它的分身）的名称/图标/形状配置合成一个摘要
+                if (k.startsWith(Const.NAME) || k.startsWith(Const.ICON) || k.startsWith(Const.SHAPE)) {
+                    String key = k.substring(2);
+                    int at = key.indexOf('@');
+                    t.merge(at < 0 ? key : key.substring(0, at), java.util.Objects.hash(k, v), Integer::sum);
+                }
             }
         }
         names = n;
         icons = i;
         shapes = s;
         folds = f;
+        tokens = t;
         rawCache.clear();
         styledCache.clear();
+    }
+
+    /** 配置的键：主用户就是包名，分身（多开）是 包名@用户ID，互不影响。 */
+    private static String key(String pkg, int userId) {
+        return userId == 0 ? pkg : pkg + "@" + userId;
+    }
+
+    private static int userOf(ApplicationInfo ai) {
+        return ai == null ? 0 : ai.uid / 100000;
+    }
+
+    private static String keyOf(PackageItemInfo pi) {
+        ApplicationInfo ai = pi instanceof ApplicationInfo ? (ApplicationInfo) pi
+                : pi instanceof ComponentInfo ? ((ComponentInfo) pi).applicationInfo : null;
+        return key(pi.packageName, userOf(ai));
+    }
+
+    private static String keyOf(LauncherActivityInfo l) {
+        ComponentName cn = l.getComponentName();
+        return cn == null ? null : key(cn.getPackageName(), userOf(l.getApplicationInfo()));
     }
 
     private static String nameFor(String pkg) {
@@ -206,10 +245,43 @@ public class Hook implements IXposedHookLoadPackage {
         return out;
     }
 
+    private static Boolean miuiIcons;
+
+    /** 有澎湃的主题图标引擎就走它，否则（moto、Pixel 等原生系统）交给启动器自己套形状。 */
+    private static boolean hasMiuiIconEngine() {
+        if (miuiIcons == null) {
+            try {
+                Class.forName("miui.content.res.IconCustomizer");
+                miuiIcons = Boolean.TRUE;
+            } catch (Throwable t) {
+                miuiIcons = Boolean.FALSE;
+            }
+        }
+        return miuiIcons;
+    }
+
     private static Drawable iconFor(String pkg, Resources res) {
+        Resources r = res != null ? res : Resources.getSystem();
+        if (!hasMiuiIconEngine()) {
+            if (!hasIcon(pkg)) return null;
+            Bitmap raw = rawBitmap(pkg);
+            if (raw == null) return null;
+            BitmapDrawable bd = new BitmapDrawable(r, raw);
+            Boolean shape = shapes.get(pkg);
+            if (shape != null && !shape) return bd;
+            // 图片放在可视区域（108dp 里居中的 72dp）正好铺满，由启动器的形状遮罩去裁
+            return new AdaptiveIconDrawable(new InsetDrawable(bd, 1f / 6f), new ColorDrawable(Color.TRANSPARENT));
+        }
         Bitmap b = styledBitmap(pkg);
         if (b == null) return null;
-        return new BitmapDrawable(res != null ? res : Resources.getSystem(), b);
+        return new BitmapDrawable(r, b);
+    }
+
+    /** 让启动器的图标缓存在名称/图标改动后失效：拼进它的 system_state 里。 */
+    private static String stateToken(String pkg) {
+        refresh();
+        Integer h = tokens.get(pkg);
+        return h == null ? "" : "facet2:" + Integer.toHexString(h);   // 2：按用户区分配置后的缓存格式
     }
 
     /** SystemUI 的图标缓存要求是 Bitmap。 */
@@ -228,7 +300,7 @@ public class Hook implements IXposedHookLoadPackage {
                 if (bypass.get() != null) return;
                 Object ai = param.args.length > 0 ? param.args[0] : null;
                 if (ai instanceof ApplicationInfo) {
-                    String n = nameFor(((ApplicationInfo) ai).packageName);
+                    String n = nameFor(keyOf((ApplicationInfo) ai));
                     if (n != null) param.setResult(n);
                 }
             }
@@ -240,7 +312,7 @@ public class Hook implements IXposedHookLoadPackage {
                 if (bypass.get() != null || param.hasThrowable()) return;
                 if (!(param.thisObject instanceof PackageItemInfo)) return;
                 PackageItemInfo pi = (PackageItemInfo) param.thisObject;
-                String n = nameFor(pi.packageName);
+                String n = nameFor(keyOf(pi));
                 if (n == null) return;
                 if (pi instanceof ApplicationInfo) {
                     param.setResult(n);
@@ -269,11 +341,14 @@ public class Hook implements IXposedHookLoadPackage {
                 if (param.args.length < 2 || !(param.args[0] instanceof PackageItemInfo)) return;
                 PackageItemInfo item = (PackageItemInfo) param.args[0];
                 ApplicationInfo ai = param.args[1] instanceof ApplicationInfo ? (ApplicationInfo) param.args[1] : null;
-                if (!hasIcon(item.packageName)) return;
+                ApplicationInfo owner = ai != null ? ai : item instanceof ApplicationInfo ? (ApplicationInfo) item
+                        : item instanceof ComponentInfo ? ((ComponentInfo) item).applicationInfo : null;
+                String key = key(item.packageName, userOf(owner));
+                if (!hasIcon(key)) return;
                 boolean sameAsApp = item instanceof ApplicationInfo || item.icon == 0
                         || (ai != null && item.icon == ai.icon);
                 if (!sameAsApp) return;
-                Drawable d = iconFor(item.packageName, null);
+                Drawable d = iconFor(key, null);
                 if (d == null) return;
                 if ("loadItemIcon".equals(param.method.getName()) && ai != null) {
                     d = ((PackageManager) param.thisObject).getUserBadgedIcon(d, UserHandle.getUserHandleForUid(ai.uid));
@@ -287,8 +362,8 @@ public class Hook implements IXposedHookLoadPackage {
         safeHookAll(LauncherActivityInfo.class, "getIcon", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                ComponentName cn = ((LauncherActivityInfo) param.thisObject).getComponentName();
-                Drawable d = cn == null ? null : iconFor(cn.getPackageName(), null);
+                String k = keyOf((LauncherActivityInfo) param.thisObject);
+                Drawable d = k == null ? null : iconFor(k, null);
                 if (d != null) param.setResult(d);
             }
         });
@@ -318,8 +393,8 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (!(param.args[0] instanceof LauncherActivityInfo)) return;
-                ComponentName cn = ((LauncherActivityInfo) param.args[0]).getComponentName();
-                Drawable d = cn == null ? null : iconFor(cn.getPackageName(), null);
+                String k = keyOf((LauncherActivityInfo) param.args[0]);
+                Drawable d = k == null ? null : iconFor(k, null);
                 if (d != null) param.setResult(d);
             }
         });
@@ -329,7 +404,7 @@ public class Hook implements IXposedHookLoadPackage {
         XC_MethodHook taskIconHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                Drawable d = iconFor(taskPackage(param.args[0]), null);
+                Drawable d = iconFor(taskKeyOf(param.args[0]), null);
                 if (d != null) param.setResult(d);
             }
         };
@@ -339,7 +414,7 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (!(param.args[0] instanceof ComponentInfo)) return;
-                Drawable d = iconFor(((ComponentInfo) param.args[0]).packageName, null);
+                Drawable d = iconFor(keyOf((ComponentInfo) param.args[0]), null);
                 if (d != null) param.setResult(d);
             }
         });
@@ -349,7 +424,7 @@ public class Hook implements IXposedHookLoadPackage {
         safeHookAll(taskLoader, "getAndUpdateActivityTitle", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                String n = nameFor(taskPackage(param.args[0]));
+                String n = nameFor(taskKeyOf(param.args[0]));
                 if (n != null) param.setResult(n);
             }
         });
@@ -361,7 +436,7 @@ public class Hook implements IXposedHookLoadPackage {
                 if (!(param.args[0] instanceof ActivityManager.RunningTaskInfo)) return;
                 ActivityManager.RunningTaskInfo info = (ActivityManager.RunningTaskInfo) param.args[0];
                 ComponentName cn = info.baseActivity != null ? info.baseActivity : info.topActivity;
-                String n = cn == null ? null : nameFor(cn.getPackageName());
+                String n = cn == null ? null : nameFor(key(cn.getPackageName(), intField(info, "userId")));
                 if (n == null) return;
                 try {
                     Object task = XposedHelpers.callMethod(param.thisObject, "findTaskById", info.taskId);
@@ -372,12 +447,57 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
-    private static String taskPackage(Object taskKey) {
+    // ---------------------------------------------------------------- 原生 Launcher3（moto、Pixel 等）
+
+    private static void hookLauncher3(ClassLoader cl) {
+        Class<?> provider = XposedHelpers.findClassIfExists("com.android.launcher3.icons.IconProvider", cl);
+        safeHookAll(provider, "getIcon", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                String pkg = null;
+                Object a = param.args.length > 0 ? param.args[0] : null;
+                if (a instanceof ComponentInfo) pkg = keyOf((ComponentInfo) a);
+                else if (a instanceof LauncherActivityInfo) pkg = keyOf((LauncherActivityInfo) a);
+                Drawable d = pkg == null ? null : iconFor(pkg, null);
+                if (d != null) param.setResult(d);
+            }
+        });
+        safeHookAll(provider, "getSystemStateForPackage", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (param.args.length < 2 || !(param.args[1] instanceof String) || param.getResult() == null) return;
+                String token = stateToken((String) param.args[1]);
+                if (!token.isEmpty()) param.setResult(param.getResult() + "," + token);
+            }
+        });
+        Class<?> logic = XposedHelpers.findClassIfExists("com.android.launcher3.icons.LauncherActivityCachingLogic", cl);
+        safeHookAll(logic, "getLabel", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (!(param.args[0] instanceof LauncherActivityInfo)) return;
+                String k = keyOf((LauncherActivityInfo) param.args[0]);
+                String n = k == null ? null : nameFor(k);
+                if (n != null) param.setResult(n);
+            }
+        });
+    }
+
+    private static String taskKeyOf(Object taskKey) {
         if (taskKey == null) return null;
         try {
-            return (String) XposedHelpers.callMethod(taskKey, "getPackageName");
+            String pkg = (String) XposedHelpers.callMethod(taskKey, "getPackageName");
+            return key(pkg, intField(taskKey, "userId"));
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    private static int intField(Object o, String name) {
+        try {
+            Object v = XposedHelpers.getObjectField(o, name);
+            return v instanceof Integer ? (Integer) v : 0;
+        } catch (Throwable t) {
+            return 0;
         }
     }
 
@@ -391,7 +511,9 @@ public class Hook implements IXposedHookLoadPackage {
             protected void afterHookedMethod(MethodHookParam param) {
                 String pkg = (String) XposedHelpers.getObjectField(param.thisObject, "mPkgName");
                 if (pkg == null) pkg = (String) XposedHelpers.callMethod(param.thisObject, "getPackageName");
-                String n = nameFor(pkg);
+                int user = param.thisObject instanceof StatusBarNotification
+                        ? ((StatusBarNotification) param.thisObject).getUserId() : 0;
+                String n = nameFor(key(pkg, user));
                 if (n != null) param.setResult(n);
             }
         });
@@ -409,7 +531,7 @@ public class Hook implements IXposedHookLoadPackage {
                     Object entry = param.args[0];
                     Object sbn = XposedHelpers.getObjectField(entry, "mSbn");
                     String pkg = (String) XposedHelpers.getObjectField(sbn, "mPkgName");
-                    if (notifUtil != null && shouldFold(pkg)) {
+                    if (notifUtil != null && shouldFold(key(pkg, ((StatusBarNotification) sbn).getUserId()))) {
                         XposedHelpers.callStaticMethod(notifUtil, "setFold", entry, true);
                     }
                 } catch (Throwable t) {
@@ -422,7 +544,7 @@ public class Hook implements IXposedHookLoadPackage {
         XC_MethodHook drawableHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                Bitmap b = sysuiBitmap((String) param.args[0]);
+                Bitmap b = sysuiBitmap(key((String) param.args[0], param.args[1] instanceof Integer ? (Integer) param.args[1] : 0));
                 if (b != null) param.setResult(new BitmapDrawable(Resources.getSystem(), b));
             }
         };
@@ -431,7 +553,7 @@ public class Hook implements IXposedHookLoadPackage {
         safeHookAll(appIcons, "getAppIconBitmap", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                Bitmap b = sysuiBitmap((String) param.args[1]);
+                Bitmap b = sysuiBitmap(key((String) param.args[1], param.args[0] instanceof Integer ? (Integer) param.args[0] : 0));
                 if (b != null) param.setResult(b);
             }
         });
