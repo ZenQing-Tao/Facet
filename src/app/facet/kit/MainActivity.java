@@ -61,6 +61,7 @@ public class MainActivity extends Activity {
     // 编辑对话框状态
     private String editPkg;
     private AlertDialog progressDialog;
+    private Set<String> editFolds = new java.util.LinkedHashSet<>();
     private SharedPreferences state;
     private ImageView editPreview;
     private String editIcon;      // 新选的图标（base64），null 表示未改动
@@ -244,7 +245,7 @@ public class MainActivity extends Activity {
         for (String k : sp.getAll().keySet()) {
             if (k.startsWith(Const.NAME)) pkgs.add(k.substring(Const.NAME.length()));
             if (k.startsWith(Const.ICON)) pkgs.add(k.substring(Const.ICON.length()));
-            if (k.startsWith(Const.FOLD) && sp.getBoolean(k, false)) pkgs.add(k.substring(Const.FOLD.length()));
+            if (k.startsWith(Const.FOLD) && !foldOf(k.substring(Const.FOLD.length())).isEmpty()) pkgs.add(k.substring(Const.FOLD.length()));
         }
         count = pkgs.size();
         String s;
@@ -301,8 +302,74 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 该应用已设置折叠的通知渠道（逗号分隔）；旧版本留下的布尔值当作没设置。 */
+    private String foldOf(String key) {
+        Object v = sp.getAll().get(Const.FOLD + key);
+        return v instanceof String ? (String) v : "";
+    }
+
+    private String foldSummary() {
+        return editFolds.isEmpty() ? "折叠的通知渠道：无（所有通知照常提醒）"
+                : "折叠的通知渠道：" + android.text.TextUtils.join("、", editFolds);
+    }
+
+    /** 用 root 读系统里这个应用已有的通知渠道，让你勾选要折叠哪几个。 */
+    private void chooseChannels(AppItem item, TextView foldView) {
+        toast("正在读取通知渠道…");
+        new Thread(() -> {
+            List<String[]> channels = new ArrayList<>();
+            String error = null;
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "dumpsys notification --noredact"});
+                java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream(), "UTF-8"));
+                java.util.regex.Pattern app = java.util.regex.Pattern.compile("AppSettings: (\\S+) \\((\\d+)\\)");
+                java.util.regex.Pattern ch = java.util.regex.Pattern.compile(
+                        "NotificationChannel\\{mId='([^']*)', mName=(.*?), mDescription=");
+                boolean in = false;
+                Set<String> seenIds = new HashSet<>();
+                String line;
+                while ((line = r.readLine()) != null) {
+                    java.util.regex.Matcher m = app.matcher(line);
+                    if (m.find()) {
+                        in = item.pkg.equals(m.group(1)) && Long.parseLong(m.group(2)) / 100000 == item.userId;
+                        continue;
+                    }
+                    if (!in) continue;
+                    java.util.regex.Matcher c = ch.matcher(line);
+                    if (c.find() && !line.contains("mDeleted=true") && seenIds.add(c.group(1))) {
+                        channels.add(new String[]{c.group(1), c.group(2)});
+                    }
+                }
+                p.waitFor();
+            } catch (Exception e) {
+                error = "需要 Root 才能读取通知渠道（" + e.getMessage() + "）";
+            }
+            String err = error;
+            runOnUiThread(() -> {
+                if (err != null) { toast(err); return; }
+                if (channels.isEmpty()) { toast("没有找到这个应用的通知渠道（它可能还没发过通知）"); return; }
+                String[] labels = new String[channels.size()];
+                boolean[] checked = new boolean[channels.size()];
+                for (int i = 0; i < labels.length; i++) {
+                    labels[i] = channels.get(i)[1] + "  (" + channels.get(i)[0] + ")";
+                    checked[i] = editFolds.contains(channels.get(i)[0]);
+                }
+                new AlertDialog.Builder(this)
+                        .setTitle("折叠哪些通知渠道？")
+                        .setMultiChoiceItems(labels, checked, (d, which, on) -> {
+                            String id = channels.get(which)[0];
+                            if (on) editFolds.add(id); else editFolds.remove(id);
+                        })
+                        .setPositiveButton("确定", (d, w) -> foldView.setText(foldSummary()))
+                        .setNegativeButton("取消", (d, w) -> { })
+                        .show();
+            });
+        }).start();
+    }
+
     private boolean isCustomized(String pkg) {
-        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg) || sp.getBoolean(Const.FOLD + pkg, false);
+        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg) || !foldOf(pkg).isEmpty();
     }
 
     private void filter() {
@@ -374,10 +441,16 @@ public class MainActivity extends Activity {
         shape.setChecked(sp.getBoolean(Const.SHAPE + item.key, true));
         box.addView(shape);
 
-        CheckBox fold = new CheckBox(this);
-        fold.setText("通知折叠进「更多通知」");
-        fold.setChecked(sp.getBoolean(Const.FOLD + item.key, false));
-        box.addView(fold);
+        // 只折叠指定的通知渠道（比如常驻的「后台连接」），别的渠道（新消息等）照常提醒
+        editFolds = new java.util.LinkedHashSet<>();
+        for (String c : foldOf(item.key).split(",")) {
+            if (!c.trim().isEmpty()) editFolds.add(c.trim());
+        }
+        TextView foldView = new TextView(this);
+        foldView.setPadding(0, dp(8), 0, 0);
+        foldView.setText(foldSummary());
+        box.addView(foldView);
+        box.addView(button("选择要折叠进「更多通知」的通知渠道", v -> chooseChannels(item, foldView)));
 
         new AlertDialog.Builder(this)
                 .setTitle("自定义 " + item.label)
@@ -389,7 +462,8 @@ public class MainActivity extends Activity {
                     if (editIcon != null) e.putString(Const.ICON + item.key, editIcon);
                     else if (editIconCleared) e.remove(Const.ICON + item.key);
                     e.putBoolean(Const.SHAPE + item.key, shape.isChecked());
-                    if (fold.isChecked()) e.putBoolean(Const.FOLD + item.key, true); else e.remove(Const.FOLD + item.key);
+                    if (editFolds.isEmpty()) e.remove(Const.FOLD + item.key);
+                    else e.putString(Const.FOLD + item.key, android.text.TextUtils.join(",", editFolds));
                     e.commit();
                     toast("已保存。点「重启桌面」「重启系统界面」生效");
                     updateStatus();
@@ -533,7 +607,7 @@ public class MainActivity extends Activity {
             String alias = sp.getString(Const.NAME + it.key, null);
             t1.setText(alias != null ? alias + "  ←  " + it.label : it.label);
             t2.setText(it.pkg + (it.userId != 0 ? " · 分身" : "") + (custom != null ? " · 已换图标" : "")
-                    + (sp.getBoolean(Const.FOLD + it.key, false) ? " · 通知已折叠" : ""));
+                    + (foldOf(it.key).isEmpty() ? "" : " · 折叠：" + foldOf(it.key)));
             return row;
         }
     }

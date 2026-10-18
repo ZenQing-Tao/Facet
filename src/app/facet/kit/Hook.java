@@ -53,7 +53,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Map<String, String> names = Collections.emptyMap();
     private static volatile Map<String, String> icons = Collections.emptyMap();
     private static volatile Map<String, Boolean> shapes = Collections.emptyMap();
-    private static volatile Set<String> folds = Collections.emptySet();
+    private static volatile Map<String, Set<String>> folds = Collections.emptyMap();
     private static volatile Map<String, Integer> tokens = Collections.emptyMap();
 
     private static final Map<String, Bitmap> rawCache = new ConcurrentHashMap<>();
@@ -118,7 +118,7 @@ public class Hook implements IXposedHookLoadPackage {
         Map<String, String> n = new HashMap<>();
         Map<String, String> i = new HashMap<>();
         Map<String, Boolean> s = new HashMap<>();
-        Set<String> f = new HashSet<>();
+        Map<String, Set<String>> f = new HashMap<>();
         Map<String, Integer> t = new HashMap<>();
         if (all != null) {
             for (Map.Entry<String, ?> e : all.entrySet()) {
@@ -130,8 +130,14 @@ public class Hook implements IXposedHookLoadPackage {
                     i.put(k.substring(Const.ICON.length()), (String) v);
                 } else if (k.startsWith(Const.SHAPE) && v instanceof Boolean) {
                     s.put(k.substring(Const.SHAPE.length()), (Boolean) v);
-                } else if (k.startsWith(Const.FOLD) && Boolean.TRUE.equals(v)) {
-                    f.add(k.substring(Const.FOLD.length()));
+                } else if (k.startsWith(Const.FOLD) && v instanceof String) {
+                    // 值是要折叠的通知渠道 ID，逗号分隔。旧版本存的布尔值（整个应用）一律忽略：
+                    // 把一个应用的全部通知折叠起来会让新消息不再提醒。
+                    Set<String> ch = new HashSet<>();
+                    for (String c : ((String) v).split(",")) {
+                        if (!c.trim().isEmpty()) ch.add(c.trim());
+                    }
+                    if (!ch.isEmpty()) f.put(k.substring(Const.FOLD.length()), ch);
                 }
                 // 启动器缓存失效用：同一个包（含它的分身）的名称/图标/形状配置合成一个摘要
                 if (k.startsWith(Const.NAME) || k.startsWith(Const.ICON) || k.startsWith(Const.SHAPE)) {
@@ -176,10 +182,12 @@ public class Hook implements IXposedHookLoadPackage {
         return names.get(pkg);
     }
 
-    private static boolean shouldFold(String pkg) {
-        if (pkg == null) return false;
+    /** 这条通知（应用 key + 渠道）是否要折叠；只认明确指定的渠道。 */
+    private static boolean shouldFold(String key, String channelId) {
+        if (key == null || channelId == null) return false;
         refresh();
-        return folds.contains(pkg);
+        Set<String> ch = folds.get(key);
+        return ch != null && ch.contains(channelId);
     }
 
     private static boolean hasIcon(String pkg) {
@@ -531,7 +539,8 @@ public class Hook implements IXposedHookLoadPackage {
                     Object entry = param.args[0];
                     Object sbn = XposedHelpers.getObjectField(entry, "mSbn");
                     String pkg = (String) XposedHelpers.getObjectField(sbn, "mPkgName");
-                    if (notifUtil != null && shouldFold(key(pkg, ((StatusBarNotification) sbn).getUserId()))) {
+                    StatusBarNotification sb = (StatusBarNotification) sbn;
+                    if (notifUtil != null && shouldFold(key(pkg, sb.getUserId()), sb.getNotification().getChannelId())) {
                         XposedHelpers.callStaticMethod(notifUtil, "setFold", entry, true);
                     }
                 } catch (Throwable t) {
