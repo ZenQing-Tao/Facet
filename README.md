@@ -15,9 +15,14 @@
 
 不会改包名、不改 APK、不影响签名，微信、银行类这种会校验签名的应用也能用。关掉模块就恢复原样。
 
+- **分身 / 多开独立设置**：应用分身（用户 900、XSpace 等）里的副本单独列一项，改原应用不会连带改分身，反过来也一样。
+- **通知折叠进「更多通知」**（澎湃）：给常驻通知的应用打勾，通知会立刻折叠进「更多通知」，不用等 6 小时。
+
 ## 使用
 
-**需要**：已 Root，装好 LSPosed 或 [Vector](https://github.com/JingMatrix/Vector)。实测环境：Xiaomi 17 Pro Max · HyperOS 3.0 · Android 16 · KernelSU Next + Vector 2.2。
+**需要**：已 Root，装好 LSPosed 或 [Vector](https://github.com/JingMatrix/Vector)。实测环境：
+- Xiaomi 17 Pro Max · HyperOS 3.0 · Android 16 · KernelSU Next + Vector 2.2（桌面、最近任务、通知、设置全支持）
+- Motorola XT2601-1 · Android 16 · KernelSU Next + Vector 2.2（原生 Launcher3：桌面、最近任务、应用名/图标；作用域勾选 `com.motorola.launcher3`）
 
 1. 从 [Releases](../../releases/latest) 下载 `Facet-vX.Y.apk` 安装。
 2. 在 LSPosed / Vector 里启用模块，作用域勾选：系统桌面、系统界面、设置、手机管家、通知管理、Facet 自己。重启一次手机。
@@ -38,6 +43,7 @@
 |---|---|
 | 所有作用域进程 | `ApplicationPackageManager.getApplicationLabel / loadItemIcon / loadUnbadgedItemIcon`、`PackageItemInfo.loadLabel`、`LauncherActivityInfo.getIcon` |
 | 桌面 `com.miui.home` | `IconProvider.getActivityIcon`；最近任务 `IconLoader`、`RecentsTaskLoader.getAndUpdateActivityTitle`、`RecentsModel.onTaskDescriptionChanged` |
+| 原生 Launcher3（moto、Pixel 等） | `IconProvider.getIcon`、`LauncherActivityCachingLogic.getLabel`；`IconProvider.getSystemStateForPackage` 里附加配置摘要，让启动器的图标缓存在设置变化后自动失效 |
 | 系统界面 | `ExpandedNotification.getAppName`、`AppIconsManager.getAppIconInner / loadAppIcon / getAppIconBitmap` |
 
 图标形状交给 `miui.content.res.IconCustomizer.generateIconStyleDrawable` 处理。澎湃是闭源系统，这些类名来自 HyperOS 3.0.319 的反编译结果，系统大版本更新后可能需要调整。
