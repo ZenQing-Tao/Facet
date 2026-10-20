@@ -259,6 +259,11 @@ public class MainActivity extends Activity {
         status.setText(s + "\n版本 v" + versionName() + " · GitHub: " + Updater.REPO);
     }
 
+    private static final String[][] SYSTEM_NOTIFIERS = {
+            {"android", "Android 系统（LSPosed / Vector 通知）"},
+            {"com.android.shell", "Shell（adb / 调试通知）"},
+    };
+
     private void loadApps() {
         new Thread(() -> {
             LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
@@ -284,6 +289,20 @@ public class MainActivity extends Activity {
                     it.label = String.valueOf(pm.getUserBadgedLabel(info.getLabel(), u));
                     it.icon = info.getBadgedIcon(0);
                     items.add(it);
+                }
+            }
+            // 没有桌面图标、但会发通知的系统包（比如 LSPosed / Vector 的「已加载」通知是以 android 的名义发的）
+            for (String[] sys : SYSTEM_NOTIFIERS) {
+                if (!seen.add(sys[0])) continue;
+                try {
+                    AppItem it = new AppItem();
+                    it.pkg = sys[0];
+                    it.userId = 0;
+                    it.key = sys[0];
+                    it.label = sys[1];
+                    it.icon = pm.getApplicationIcon(sys[0]);
+                    items.add(it);
+                } catch (Exception ignored) {
                 }
             }
             runOnUiThread(() -> {
