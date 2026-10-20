@@ -158,7 +158,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     /** 配置的键：主用户就是包名，分身（多开）是 包名@用户ID，互不影响。 */
     private static String key(String pkg, int userId) {
-        return userId == 0 ? pkg : pkg + "@" + userId;
+        // 系统通知（USB 调试 / 充电等）的用户是 USER_ALL(-1)，和主用户用同一份设置
+        return userId <= 0 ? pkg : pkg + "@" + userId;
     }
 
     private static int userOf(ApplicationInfo ai) {
