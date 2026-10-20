@@ -549,6 +549,25 @@ public class Hook implements IXposedHookLoadPackage {
             }
         });
 
+        // 系统通知（发送者是 android 等系统包，比如 LSPosed 的「已加载」）会被 shouldIgnoreEntry 整个跳过，
+        // 根本走不到上面的 scheduleHistoryNotification；对用户明确勾选的渠道放行。
+        safeHookAll(notifUtil, "shouldIgnoreEntry", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                try {
+                    if (!Boolean.TRUE.equals(param.getResult())) return;
+                    Object sbn = XposedHelpers.getObjectField(param.args[0], "mSbn");
+                    StatusBarNotification sb = (StatusBarNotification) sbn;
+                    String pkg = (String) XposedHelpers.getObjectField(sbn, "mPkgName");
+                    if (shouldFold(key(pkg, sb.getUserId()), sb.getNotification().getChannelId())) {
+                        param.setResult(Boolean.FALSE);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + "shouldIgnoreEntry failed: " + t);
+                }
+            }
+        });
+
         Class<?> appIcons = XposedHelpers.findClassIfExists("com.miui.systemui.graphics.AppIconsManager", cl);
         XC_MethodHook drawableHook = new XC_MethodHook() {
             @Override
