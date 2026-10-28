@@ -106,6 +106,8 @@ public class MainActivity extends Activity {
         buttons.addView(button("重启系统界面", v -> restart("com.android.systemui")), weight());
         buttons.addView(button("检查更新", v -> checkUpdate(true)), weight());
         root.addView(buttons);
+        // 澎湃 OS 4 的原生桌面 LSPosed 进不去，图标只能写进主题图标包；换主题后由 ThemeReceiver 自动重写
+        root.addView(button("把自定义图标写入桌面（澎湃 OS 4；换主题后会自动重写）", v -> syncThemeIcons()));
 
         EditText search = new EditText(this);
         search.setHint("搜索应用名或包名");
@@ -246,6 +248,8 @@ public class MainActivity extends Activity {
             if (k.startsWith(Const.NAME)) pkgs.add(k.substring(Const.NAME.length()));
             if (k.startsWith(Const.ICON)) pkgs.add(k.substring(Const.ICON.length()));
             if (k.startsWith(Const.FOLD) && !foldOf(k.substring(Const.FOLD.length())).isEmpty()) pkgs.add(k.substring(Const.FOLD.length()));
+            if (k.startsWith(Const.COUNTRY)) pkgs.add(k.substring(Const.COUNTRY.length()));
+            if (k.startsWith(Const.MAKER)) pkgs.add(k.substring(Const.MAKER.length()));
         }
         count = pkgs.size();
         String s;
@@ -388,7 +392,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean isCustomized(String pkg) {
-        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg) || !foldOf(pkg).isEmpty();
+        return sp.contains(Const.NAME + pkg) || sp.contains(Const.ICON + pkg) || !foldOf(pkg).isEmpty()
+                || sp.contains(Const.COUNTRY + pkg) || sp.contains(Const.MAKER + pkg);
     }
 
     private void filter() {
@@ -471,10 +476,28 @@ public class MainActivity extends Activity {
         box.addView(foldView);
         box.addView(button("选择要折叠进「更多通知」的通知渠道", v -> chooseChannels(item, foldView)));
 
+        // 只改这个应用自己读到的 SIM / 网络国家码；需要在 LSPosed 里把它加进作用域
+        EditText country = new EditText(this);
+        country.setSingleLine(true);
+        country.setHint("伪装国家码，如 us（留空 = 不改）");
+        country.setText(sp.getString(Const.COUNTRY + item.key, ""));
+        box.addView(country);
+
+        EditText maker = new EditText(this);
+        maker.setSingleLine(true);
+        maker.setHint("伪装厂商，如 samsung（留空 = 不改）");
+        maker.setText(sp.getString(Const.MAKER + item.key, ""));
+        box.addView(maker);
+
         new AlertDialog.Builder(this)
                 .setTitle("自定义 " + item.label)
                 .setView(box)
                 .setPositiveButton("保存", (d, w) -> {
+                    String cc = country.getText().toString().trim().toLowerCase(Locale.ROOT);
+                    if (!cc.isEmpty() && !cc.matches("[a-z]{2}")) {
+                        toast("国家码要是两位字母，比如 us、hk、gb；其它设置未保存");
+                        return;
+                    }
                     SharedPreferences.Editor e = sp.edit();
                     String n = name.getText().toString().trim();
                     if (n.isEmpty()) e.remove(Const.NAME + item.key); else e.putString(Const.NAME + item.key, n);
@@ -483,14 +506,19 @@ public class MainActivity extends Activity {
                     e.putBoolean(Const.SHAPE + item.key, shape.isChecked());
                     if (editFolds.isEmpty()) e.remove(Const.FOLD + item.key);
                     else e.putString(Const.FOLD + item.key, android.text.TextUtils.join(",", editFolds));
+                    if (cc.isEmpty()) e.remove(Const.COUNTRY + item.key); else e.putString(Const.COUNTRY + item.key, cc);
+                    String mk = maker.getText().toString().trim();
+                    if (mk.isEmpty()) e.remove(Const.MAKER + item.key); else e.putString(Const.MAKER + item.key, mk);
                     e.commit();
-                    toast("已保存。点「重启桌面」「重启系统界面」生效");
+                    toast(cc.isEmpty() && mk.isEmpty() ? "已保存。点「重启桌面」「重启系统界面」生效"
+                            : "已保存。国家码 / 厂商要在 LSPosed 里把该应用加进作用域，并强行停止它后重新打开才生效");
                     updateStatus();
                     filter();
                 })
                 .setNeutralButton("全部恢复", (d, w) -> {
                     sp.edit().remove(Const.NAME + item.key).remove(Const.ICON + item.key)
-                            .remove(Const.SHAPE + item.key).remove(Const.FOLD + item.key).commit();
+                            .remove(Const.SHAPE + item.key).remove(Const.FOLD + item.key)
+                            .remove(Const.COUNTRY + item.key).remove(Const.MAKER + item.key).commit();
                     toast("已恢复默认");
                     updateStatus();
                     filter();
@@ -577,6 +605,17 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // ---------------------------------------------------------------- 主题图标包（澎湃 OS 4 桌面）
+
+    /** 手动写入：不管包里是不是已经是这版配置，都重写一次并重启桌面。 */
+    private void syncThemeIcons() {
+        toast("正在写入桌面图标…");
+        new Thread(() -> {
+            String m = ThemeIcons.sync(this, true);
+            runOnUiThread(() -> toast(m));
+        }).start();
+    }
+
     private static byte[] readFully(java.io.InputStream in) throws java.io.IOException {
         java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
         byte[] buf = new byte[1024];
@@ -626,7 +665,9 @@ public class MainActivity extends Activity {
             String alias = sp.getString(Const.NAME + it.key, null);
             t1.setText(alias != null ? alias + "  ←  " + it.label : it.label);
             t2.setText(it.pkg + (it.userId != 0 ? " · 分身" : "") + (custom != null ? " · 已换图标" : "")
-                    + (foldOf(it.key).isEmpty() ? "" : " · 折叠：" + foldOf(it.key)));
+                    + (foldOf(it.key).isEmpty() ? "" : " · 折叠：" + foldOf(it.key))
+                    + (sp.contains(Const.COUNTRY + it.key) ? " · 国家：" + sp.getString(Const.COUNTRY + it.key, "") : "")
+                    + (sp.contains(Const.MAKER + it.key) ? " · 厂商：" + sp.getString(Const.MAKER + it.key, "") : ""));
             return row;
         }
     }
