@@ -421,6 +421,9 @@ public class MainActivity extends Activity {
         editPkg = item.pkg;
         editIcon = null;
         editIconCleared = false;
+        // 记录打开弹窗时的初始值：保存时只有图标/范围变了才写主题包，避免每次保存都重启桌面
+        final String initIcon = sp.getString(Const.ICON + item.key, null);
+        final String initMode = sp.getString(Const.MODE + item.key, Const.MODE_ALL);
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -478,9 +481,16 @@ public class MainActivity extends Activity {
         modeRow.setPadding(0, dp(8), 0, 0);
         modeRow.addView(modeSpin, new LinearLayout.LayoutParams(0, -2, 1f));
         modeRow.addView(button("替换", v -> {
-            if (!sp.contains(Const.ICON + item.key)) {
+            // 优先用界面上刚选的图；没选过才回退到已保存的配置
+            String iconB64 = editIcon != null ? editIcon : sp.getString(Const.ICON + item.key, null);
+            if (iconB64 == null) {
                 toast("先选择一个图标图片");
                 return;
+            }
+            if (editIcon != null) {
+                // 刚选的图直接落盘，避免用户忘记点「保存」
+                sp.edit().putString(Const.ICON + item.key, editIcon).commit();
+                editIconCleared = false;
             }
             String mode = modeValues[modeSpin.getSelectedItemPosition()];
             SharedPreferences.Editor ed = sp.edit();
@@ -540,10 +550,19 @@ public class MainActivity extends Activity {
                     if (cc.isEmpty()) e.remove(Const.COUNTRY + item.key); else e.putString(Const.COUNTRY + item.key, cc);
                     String mk = maker.getText().toString().trim();
                     if (mk.isEmpty()) e.remove(Const.MAKER + item.key); else e.putString(Const.MAKER + item.key, mk);
+                    // 顺带把「替换范围」也存下来，避免只改范围没点替换就丢了
+                    String pickedMode = modeValues[modeSpin.getSelectedItemPosition()];
+                    if (Const.MODE_ALL.equals(pickedMode)) e.remove(Const.MODE + item.key);
+                    else e.putString(Const.MODE + item.key, pickedMode);
                     e.commit();
                     if (editIconCleared && !item.key.contains("@")) {
-                        // 主题包里可能还留着上次写进去的图标，这里一并还原
+                        // 恢复原图标：主题包里可能还留着上次写进去的图标，这里一并还原
                         new Thread(() -> ThemeIcons.removeOne(MainActivity.this, item.key)).start();
+                    } else if (!item.key.contains("@") && sp.contains(Const.ICON + item.key)
+                            && (!pickedMode.equals(initMode)
+                            || !String.valueOf(initIcon).equals(String.valueOf(sp.getString(Const.ICON + item.key, null))))) {
+                        // 只有图标或范围真的变了才写主题包（保存后自动生效，不用再点「替换」）
+                        applyIcon(item, pickedMode);
                     }
                     toast(cc.isEmpty() && mk.isEmpty() ? "已保存。点「重启桌面」「重启系统界面」生效"
                             : "已保存。国家码 / 厂商要在 LSPosed 里把该应用加进作用域，并强行停止它后重新打开才生效");
