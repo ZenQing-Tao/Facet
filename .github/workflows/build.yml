@@ -114,12 +114,7 @@ jobs:
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Debug build ${TAG}" \
-            --notes "自动构建（debug / 临时签名）
-
-- commit: \`${GITHUB_SHA}\`
-- 分支: \`${GITHUB_REF_NAME}\`
-- 签名: 临时签名（如未配置 Secrets），安装前请先卸载旧版 Facet
-- 用途: 自测，请勿用于正式发布"
+            --notes "auto debug build | commit ${GITHUB_SHA} | temp signature, uninstall old Facet first"
 
       - name: Summary
         run: |
