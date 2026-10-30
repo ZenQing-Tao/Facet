@@ -1,0 +1,71 @@
+name: build-apk
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install platform / build-tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Prepare tool dir (T)
+        run: |
+          T="$RUNNER_TEMP/tools"
+          mkdir -p "$T/plat" "$T/bt"
+          ln -sfn "$JAVA_HOME" "$T/jdk"
+          ln -sfn "$ANDROID_HOME/build-tools/36.0.0" "$T/bt"
+          cp "$ANDROID_HOME/platforms/android-36/android.jar" "$T/plat/android.jar"
+          echo "T=$T" >> "$GITHUB_ENV"
+          ls -l "$T"
+
+      # 可选：仓库 Secrets 里配 FACET_KEYSTORE_B64 / FACET_KEYSTORE_PASS，
+      # 这样每次构建签名一致，能直接覆盖安装上一版；不配则每次生成新签名（装机前必须先卸载）。
+      - name: Restore keystore (optional)
+        env:
+          KS_B64: ${{ secrets.FACET_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.FACET_KEYSTORE_PASS }}
+        run: |
+          mkdir -p "$HOME/.facet"
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$HOME/.facet/facet.keystore"
+            printf '%s' "$KS_PASS" > "$HOME/.facet/keystore.pass"
+            echo "使用仓库 Secrets 里的固定签名"
+          else
+            echo "::warning::未配置 FACET_KEYSTORE_B64，本次构建使用临时签名（每次不同，装机前需卸载旧版）"
+          fi
+
+      - name: python alias
+        run: command -v python >/dev/null || sudo ln -sf "$(command -v python3)" /usr/local/bin/python
+
+      - name: Build
+        run: bash build.sh
+
+      - name: Show APK info
+        run: |
+          ls -l dist/Facet.apk
+          "$T/jdk/bin/java" -jar "$T/bt/lib/apksigner.jar" verify --print-certs dist/Facet.apk | head -5
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Facet-apk-${{ github.sha }}
+          path: dist/Facet.apk
+          if-no-files-found: error
+          retention-days: 14
