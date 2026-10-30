@@ -7,51 +7,47 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 正在迁移到 26，避免 runner 变动导致无谓失败
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Diagnose SDK
+      # 不依赖 setup-android action（它在 Node24 上可能不兼容），直接下官方 commandline-tools
+      - name: Install Android commandline-tools
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          command -v sdkmanager || echo "sdkmanager NOT on PATH"
-          sdkmanager --version || true
-          echo "--- sdk dir ---"
-          ls "$ANDROID_HOME" || true
-          ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
-          ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+          set -eux
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -fsSL -o /tmp/cmdline-tools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+          mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
       - name: Install platform / build-tools
         run: |
-          set -x
+          set -eux
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
-          sdkmanager --list_installed || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager --list_installed
 
       - name: Prepare tool dir (T)
         run: |
-          set -e
-          BT_DIR=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1)
-          PLAT_DIR=$(ls -d "$ANDROID_HOME"/platforms/* 2>/dev/null | sort -V | tail -1)
-          echo "BT_DIR=$BT_DIR"
-          echo "PLAT_DIR=$PLAT_DIR"
-          if [ -z "$BT_DIR" ] || [ -z "$PLAT_DIR" ]; then
-            echo "::error::build-tools 或 platforms 没装上，看上一步日志"
-            exit 1
-          fi
-          test -f "$PLAT_DIR/android.jar" || { echo "::error::缺少 android.jar（$PLAT_DIR）"; exit 1; }
-          test -x "$BT_DIR/aapt2" || { echo "::error::缺少 aapt2（$BT_DIR）"; ls "$BT_DIR"; exit 1; }
-          test -f "$BT_DIR/lib/d8.jar" || { echo "::error::缺少 d8.jar（$BT_DIR/lib）"; ls "$BT_DIR/lib"; exit 1; }
+          set -eux
+          BT_DIR="$ANDROID_SDK_ROOT/build-tools/36.0.0"
+          PLAT_DIR="$ANDROID_SDK_ROOT/platforms/android-36"
+          test -x "$BT_DIR/aapt2"      || { echo "::error::missing aapt2";   ls "$BT_DIR"; exit 1; }
+          test -f "$BT_DIR/lib/d8.jar" || { echo "::error::missing d8.jar";  ls "$BT_DIR/lib"; exit 1; }
+          test -f "$PLAT_DIR/android.jar" || { echo "::error::missing android.jar"; exit 1; }
 
           T="$RUNNER_TEMP/tools"
           mkdir -p "$T/plat"
@@ -59,7 +55,7 @@ jobs:
           ln -sfn "$BT_DIR" "$T/bt"
           cp "$PLAT_DIR/android.jar" "$T/plat/android.jar"
           echo "T=$T" >> "$GITHUB_ENV"
-          ls -l "$T" "$T/bt" | head -30
+          ls -l "$T"
 
       - name: Restore keystore (optional)
         env:
@@ -72,7 +68,7 @@ jobs:
             printf '%s' "$KS_PASS" > "$HOME/.facet/keystore.pass"
             echo "使用仓库 Secrets 里的固定签名"
           else
-            echo "::warning::未配置 FACET_KEYSTORE_B64，本次构建使用临时签名（每次不同，装机前需卸载旧版）"
+            echo "::warning::未配置 FACET_KEYSTORE_B64，本次使用临时签名（每次不同，装机前需卸载旧版）"
           fi
 
       - name: python alias
