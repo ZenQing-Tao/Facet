@@ -5,9 +5,12 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+# 发 Release 需要写权限（默认 GITHUB_TOKEN 是只读）
+permissions:
+  contents: write
+
 jobs:
   build:
-    # 固定 24.04：ubuntu-latest 正在迁移到 26，避免 runner 变动导致无谓失败
     runs-on: ubuntu-24.04
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
@@ -21,7 +24,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # 不依赖 setup-android action（它在 Node24 上可能不兼容），直接下官方 commandline-tools
       - name: Install Android commandline-tools
         run: |
           set -eux
@@ -45,8 +47,8 @@ jobs:
           set -eux
           BT_DIR="$ANDROID_SDK_ROOT/build-tools/36.0.0"
           PLAT_DIR="$ANDROID_SDK_ROOT/platforms/android-36"
-          test -x "$BT_DIR/aapt2"      || { echo "::error::missing aapt2";   ls "$BT_DIR"; exit 1; }
-          test -f "$BT_DIR/lib/d8.jar" || { echo "::error::missing d8.jar";  ls "$BT_DIR/lib"; exit 1; }
+          test -x "$BT_DIR/aapt2"         || { echo "::error::missing aapt2";  ls "$BT_DIR"; exit 1; }
+          test -f "$BT_DIR/lib/d8.jar"    || { echo "::error::missing d8.jar"; ls "$BT_DIR/lib"; exit 1; }
           test -f "$PLAT_DIR/android.jar" || { echo "::error::missing android.jar"; exit 1; }
 
           T="$RUNNER_TEMP/tools"
@@ -55,7 +57,6 @@ jobs:
           ln -sfn "$BT_DIR" "$T/bt"
           cp "$PLAT_DIR/android.jar" "$T/plat/android.jar"
           echo "T=$T" >> "$GITHUB_ENV"
-          ls -l "$T"
 
       - name: Restore keystore (optional)
         env:
@@ -83,6 +84,15 @@ jobs:
           set -o pipefail
           bash build.sh 2>&1 | tee build.log
 
+      - name: Rename APK
+        id: apk
+        run: |
+          set -eux
+          NAME="Facet-debug-${GITHUB_SHA::7}.apk"
+          cp dist/Facet.apk "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          ls -l "$NAME"
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,11 +101,28 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Facet-apk-${{ github.sha }}
-          path: dist/Facet.apk
-          if-no-files-found: error
-          retention-days: 14
+      # ci-build 分支推送时自动发 pre-release（公开直链，不需要登录）
+      - name: Publish pre-release
+        if: github.ref == 'refs/heads/ci-build'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          TAG="debug-$(date -u +%Y%m%d-%H%M%S)"
+          ASSET="${{ steps.apk.outputs.name }}"
+          gh release create "$TAG" "$ASSET" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Debug build ${TAG}" \
+            --notes "自动构建（debug / 临时签名）
+
+- commit: \`${GITHUB_SHA}\`
+- 分支: \`${GITHUB_REF_NAME}\`
+- 签名: 临时签名（如未配置 Secrets），安装前请先卸载旧版 Facet
+- 用途: 自测，请勿用于正式发布"
+
+      - name: Summary
+        run: |
+          echo "## 构建产物" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          ls -l dist/Facet.apk >> "$GITHUB_STEP_SUMMARY"
