@@ -35,6 +35,8 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ArrayAdapter;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -107,7 +109,7 @@ public class MainActivity extends Activity {
         buttons.addView(button("检查更新", v -> checkUpdate(true)), weight());
         root.addView(buttons);
         // 澎湃 OS 4 的原生桌面 LSPosed 进不去，图标只能写进主题图标包；换主题后由 ThemeReceiver 自动重写
-        root.addView(button("把自定义图标写入桌面（澎湃 OS 4；换主题后会自动重写）", v -> syncThemeIcons()));
+        root.addView(button("全部自定义图标写入桌面（澎湃 OS 4；换主题后会自动重写）", v -> syncThemeIcons()));
 
         EditText search = new EditText(this);
         search.setHint("搜索应用名或包名");
@@ -460,6 +462,35 @@ public class MainActivity extends Activity {
         iconRow.addView(reset, new LinearLayout.LayoutParams(-2, -2));
         box.addView(iconRow);
 
+        // 替换范围：全部 / 仅桌面 / 仅通知等；选好再点「替换」才落盘
+        final String[] modeLabels = {"全部（桌面 + 通知等）", "仅桌面", "仅通知 / 设置 / 最近任务"};
+        final String[] modeValues = {Const.MODE_ALL, Const.MODE_DESK, Const.MODE_NOTIF};
+        Spinner modeSpin = new Spinner(this);
+        modeSpin.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, modeLabels));
+        String curMode = sp.getString(Const.MODE + item.key, Const.MODE_ALL);
+        for (int mi = 0; mi < modeValues.length; mi++) {
+            if (modeValues[mi].equals(curMode)) modeSpin.setSelection(mi);
+        }
+        LinearLayout modeRow = new LinearLayout(this);
+        modeRow.setOrientation(LinearLayout.HORIZONTAL);
+        modeRow.setGravity(Gravity.CENTER_VERTICAL);
+        modeRow.setPadding(0, dp(8), 0, 0);
+        modeRow.addView(modeSpin, new LinearLayout.LayoutParams(0, -2, 1f));
+        modeRow.addView(button("替换", v -> {
+            if (!sp.contains(Const.ICON + item.key)) {
+                toast("先选择一个图标图片");
+                return;
+            }
+            String mode = modeValues[modeSpin.getSelectedItemPosition()];
+            SharedPreferences.Editor ed = sp.edit();
+            if (Const.MODE_ALL.equals(mode)) ed.remove(Const.MODE + item.key);
+            else ed.putString(Const.MODE + item.key, mode);
+            ed.commit();
+            applyIcon(item, mode);
+        }));
+        box.addView(modeRow);
+
         CheckBox shape = new CheckBox(this);
         shape.setText("套用当前主题的图标形状");
         shape.setChecked(sp.getBoolean(Const.SHAPE + item.key, true));
@@ -510,6 +541,10 @@ public class MainActivity extends Activity {
                     String mk = maker.getText().toString().trim();
                     if (mk.isEmpty()) e.remove(Const.MAKER + item.key); else e.putString(Const.MAKER + item.key, mk);
                     e.commit();
+                    if (editIconCleared && !item.key.contains("@")) {
+                        // 主题包里可能还留着上次写进去的图标，这里一并还原
+                        new Thread(() -> ThemeIcons.removeOne(MainActivity.this, item.key)).start();
+                    }
                     toast(cc.isEmpty() && mk.isEmpty() ? "已保存。点「重启桌面」「重启系统界面」生效"
                             : "已保存。国家码 / 厂商要在 LSPosed 里把该应用加进作用域，并强行停止它后重新打开才生效");
                     updateStatus();
@@ -518,13 +553,35 @@ public class MainActivity extends Activity {
                 .setNeutralButton("全部恢复", (d, w) -> {
                     sp.edit().remove(Const.NAME + item.key).remove(Const.ICON + item.key)
                             .remove(Const.SHAPE + item.key).remove(Const.FOLD + item.key)
-                            .remove(Const.COUNTRY + item.key).remove(Const.MAKER + item.key).commit();
+                            .remove(Const.COUNTRY + item.key).remove(Const.MAKER + item.key)
+                            .remove(Const.MODE + item.key).commit();
+                    if (!item.key.contains("@")) {
+                        new Thread(() -> ThemeIcons.removeOne(MainActivity.this, item.key)).start();
+                    }
                     toast("已恢复默认");
                     updateStatus();
                     filter();
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /** 按范围把图标落到实际位置：能 hook 的系统靠 Hook 生效，澎湃 OS 4 桌面靠主题图标包。 */
+    private void applyIcon(AppItem item, String mode) {
+        boolean miuiHome = "com.miui.home".equals(ThemeIcons.homePackage(this));
+        toast("正在应用…");
+        new Thread(() -> {
+            String r;
+            if (!miuiHome) {
+                // 非澎湃 / 非 OS4：桌面由 Hook 负责，这里不需要 root
+                r = "已应用，重启桌面 / 系统界面后生效";
+            } else if (Const.MODE_NOTIF.equals(mode)) {
+                r = ThemeIcons.removeOne(this, item.key);   // 仅通知 → 把桌面那条撤掉
+            } else {
+                r = ThemeIcons.syncOne(this, item.key);     // 全部 / 仅桌面 → 写主题包
+            }
+            runOnUiThread(() -> toast(r));
+        }).start();
     }
 
     @Override
