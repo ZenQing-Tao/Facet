@@ -465,7 +465,7 @@ public class MainActivity extends Activity {
         iconRow.addView(reset, new LinearLayout.LayoutParams(-2, -2));
         box.addView(iconRow);
 
-        // 替换范围：全部 / 仅桌面 / 仅通知等；选好再点「替换」才落盘
+        // 替换范围：全部 / 仅桌面 / 仅通知等；选好范围后点「保存」会自动应用
         final String[] modeLabels = {"全部（桌面 + 通知等）", "仅桌面", "仅通知 / 设置 / 最近任务"};
         final String[] modeValues = {Const.MODE_ALL, Const.MODE_DESK, Const.MODE_NOTIF};
         Spinner modeSpin = new Spinner(this);
@@ -480,25 +480,6 @@ public class MainActivity extends Activity {
         modeRow.setGravity(Gravity.CENTER_VERTICAL);
         modeRow.setPadding(0, dp(8), 0, 0);
         modeRow.addView(modeSpin, new LinearLayout.LayoutParams(0, -2, 1f));
-        modeRow.addView(button("替换", v -> {
-            // 优先用界面上刚选的图；没选过才回退到已保存的配置
-            String iconB64 = editIcon != null ? editIcon : sp.getString(Const.ICON + item.key, null);
-            if (iconB64 == null) {
-                toast("先选择一个图标图片");
-                return;
-            }
-            if (editIcon != null) {
-                // 刚选的图直接落盘，避免用户忘记点「保存」
-                sp.edit().putString(Const.ICON + item.key, editIcon).commit();
-                editIconCleared = false;
-            }
-            String mode = modeValues[modeSpin.getSelectedItemPosition()];
-            SharedPreferences.Editor ed = sp.edit();
-            if (Const.MODE_ALL.equals(mode)) ed.remove(Const.MODE + item.key);
-            else ed.putString(Const.MODE + item.key, mode);
-            ed.commit();
-            applyIcon(item, mode);
-        }));
         box.addView(modeRow);
 
         CheckBox shape = new CheckBox(this);
@@ -550,22 +531,32 @@ public class MainActivity extends Activity {
                     if (cc.isEmpty()) e.remove(Const.COUNTRY + item.key); else e.putString(Const.COUNTRY + item.key, cc);
                     String mk = maker.getText().toString().trim();
                     if (mk.isEmpty()) e.remove(Const.MAKER + item.key); else e.putString(Const.MAKER + item.key, mk);
-                    // 顺带把「替换范围」也存下来，避免只改范围没点替换就丢了
+                    // 顺带把「替换范围」也存下来
                     String pickedMode = modeValues[modeSpin.getSelectedItemPosition()];
                     if (Const.MODE_ALL.equals(pickedMode)) e.remove(Const.MODE + item.key);
                     else e.putString(Const.MODE + item.key, pickedMode);
                     e.commit();
+
+                    boolean desk = !Const.MODE_NOTIF.equals(pickedMode);
+                    // 只提示需要重启的情况；不需要重启的就说"修改成功"；设置类位置需重启系统界面
+                    String tip = desk ? "已应用，桌面已重启（系统界面需重启）" : "修改成功（系统界面需重启）";
+
+                    boolean iconChanged = !String.valueOf(initIcon)
+                            .equals(String.valueOf(sp.getString(Const.ICON + item.key, null)));
+                    boolean modeChanged = !pickedMode.equals(initMode);
+
                     if (editIconCleared && !item.key.contains("@")) {
-                        // 恢复原图标：主题包里可能还留着上次写进去的图标，这里一并还原
-                        new Thread(() -> ThemeIcons.removeOne(MainActivity.this, item.key)).start();
+                        // 恢复原图标：主题包里可能还留着上次写进去的图标，一并还原
+                        applyIcon(item, Const.MODE_NOTIF, "已恢复，桌面已重启（系统界面需重启）");
                     } else if (!item.key.contains("@") && sp.contains(Const.ICON + item.key)
-                            && (!pickedMode.equals(initMode)
-                            || !String.valueOf(initIcon).equals(String.valueOf(sp.getString(Const.ICON + item.key, null))))) {
-                        // 只有图标或范围真的变了才写主题包（保存后自动生效，不用再点「替换」）
-                        applyIcon(item, pickedMode);
+                            && (iconChanged || modeChanged)) {
+                        applyIcon(item, pickedMode, tip);
+                    } else {
+                        toast(tip);
                     }
-                    toast(cc.isEmpty() && mk.isEmpty() ? "已保存。点「重启桌面」「重启系统界面」生效"
-                            : "已保存。国家码 / 厂商要在 LSPosed 里把该应用加进作用域，并强行停止它后重新打开才生效");
+                    if (!cc.isEmpty() || !mk.isEmpty()) {
+                        toast("国家码 / 厂商要在 LSPosed 里把该应用加进作用域，并强行停止它后重新打开才生效");
+                    }
                     updateStatus();
                     filter();
                 })
@@ -585,21 +576,22 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** 按范围把图标落到实际位置：能 hook 的系统靠 Hook 生效，澎湃 OS 4 桌面靠主题图标包。 */
-    private void applyIcon(AppItem item, String mode) {
+    /** 按范围把图标落到实际位置；完成后用 prefix 作为提示前缀。 */
+    private void applyIcon(AppItem item, String mode, String prefix) {
         boolean miuiHome = "com.miui.home".equals(ThemeIcons.homePackage(this));
-        toast("正在应用…");
+        if (!miuiHome) {
+            // 非澎湃 / 非 OS4：桌面由 Hook 负责，需要手动重启才能看到效果
+            toast("已应用，请重启桌面与系统界面");
+            return;
+        }
         new Thread(() -> {
-            String r;
-            if (!miuiHome) {
-                // 非澎湃 / 非 OS4：桌面由 Hook 负责，这里不需要 root
-                r = "已应用，重启桌面 / 系统界面后生效";
-            } else if (Const.MODE_NOTIF.equals(mode)) {
-                r = ThemeIcons.removeOne(this, item.key);   // 仅通知 → 把桌面那条撤掉
-            } else {
-                r = ThemeIcons.syncOne(this, item.key);     // 全部 / 仅桌面 → 写主题包
-            }
-            runOnUiThread(() -> toast(r));
+            String r = Const.MODE_NOTIF.equals(mode)
+                    ? ThemeIcons.removeOne(this, item.key)   // 仅通知 → 把桌面那条撤掉
+                    : ThemeIcons.syncOne(this, item.key);    // 全部 / 仅桌面 → 写主题包
+            // 成功时只说状态；没有实际改动时不要误报"已重启"；失败时把原因原样给出来
+            boolean ok = r.contains("已写入") || r.contains("已还原") || r.contains("已清除");
+            boolean noop = r.contains("没有需要") || r.contains("已是最新");
+            runOnUiThread(() -> toast(noop ? "修改成功" : ok ? prefix : r));
         }).start();
     }
 
