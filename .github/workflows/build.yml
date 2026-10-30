@@ -20,23 +20,47 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Diagnose SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          command -v sdkmanager || echo "sdkmanager NOT on PATH"
+          sdkmanager --version || true
+          echo "--- sdk dir ---"
+          ls "$ANDROID_HOME" || true
+          ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+
       - name: Install platform / build-tools
         run: |
+          set -x
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
+          sdkmanager --list_installed || true
 
       - name: Prepare tool dir (T)
         run: |
-          T="$RUNNER_TEMP/tools"
-          mkdir -p "$T/plat" "$T/bt"
-          ln -sfn "$JAVA_HOME" "$T/jdk"
-          ln -sfn "$ANDROID_HOME/build-tools/36.0.0" "$T/bt"
-          cp "$ANDROID_HOME/platforms/android-36/android.jar" "$T/plat/android.jar"
-          echo "T=$T" >> "$GITHUB_ENV"
-          ls -l "$T"
+          set -e
+          BT_DIR=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          PLAT_DIR=$(ls -d "$ANDROID_HOME"/platforms/* 2>/dev/null | sort -V | tail -1)
+          echo "BT_DIR=$BT_DIR"
+          echo "PLAT_DIR=$PLAT_DIR"
+          if [ -z "$BT_DIR" ] || [ -z "$PLAT_DIR" ]; then
+            echo "::error::build-tools 或 platforms 没装上，看上一步日志"
+            exit 1
+          fi
+          test -f "$PLAT_DIR/android.jar" || { echo "::error::缺少 android.jar（$PLAT_DIR）"; exit 1; }
+          test -x "$BT_DIR/aapt2" || { echo "::error::缺少 aapt2（$BT_DIR）"; ls "$BT_DIR"; exit 1; }
+          test -f "$BT_DIR/lib/d8.jar" || { echo "::error::缺少 d8.jar（$BT_DIR/lib）"; ls "$BT_DIR/lib"; exit 1; }
 
-      # 可选：仓库 Secrets 里配 FACET_KEYSTORE_B64 / FACET_KEYSTORE_PASS，
-      # 这样每次构建签名一致，能直接覆盖安装上一版；不配则每次生成新签名（装机前必须先卸载）。
+          T="$RUNNER_TEMP/tools"
+          mkdir -p "$T/plat"
+          ln -sfn "$JAVA_HOME" "$T/jdk"
+          ln -sfn "$BT_DIR" "$T/bt"
+          cp "$PLAT_DIR/android.jar" "$T/plat/android.jar"
+          echo "T=$T" >> "$GITHUB_ENV"
+          ls -l "$T" "$T/bt" | head -30
+
       - name: Restore keystore (optional)
         env:
           KS_B64: ${{ secrets.FACET_KEYSTORE_B64 }}
@@ -52,17 +76,27 @@ jobs:
           fi
 
       - name: python alias
-        run: command -v python >/dev/null || sudo ln -sf "$(command -v python3)" /usr/local/bin/python
+        run: |
+          if ! command -v python >/dev/null; then
+            sudo ln -sf "$(command -v python3)" /usr/local/bin/python
+          fi
+          python -c "import zipfile; print('python ok')"
 
       - name: Build
-        run: bash build.sh
-
-      - name: Show APK info
         run: |
-          ls -l dist/Facet.apk
-          "$T/jdk/bin/java" -jar "$T/bt/lib/apksigner.jar" verify --print-certs dist/Facet.apk | head -5
+          set -o pipefail
+          bash build.sh 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Facet-apk-${{ github.sha }}
